@@ -5,18 +5,73 @@
 #include <stdexcept>
 #include <tuple>
 #include <vector>
-
 #include <cuda.h>
 #include <cublas_v2.h>
 #include <curand.h>
 
 #include <thrust/device_ptr.h>
 #include <thrust/fill.h>
-
 #include "tensor.h"
+#include "scaled_hgemm.cu"
 
-int time_gemm(Tensor<float> A, Tensor<float> B, Tensor<float> C, bool a_t, bool b_t, cublasHandle_t cublas_handle) {
-    const float alpha = 1.f / static_cast<float>(A.dims()[1]);
+
+
+int time_Hgemm(Tensor<half> A, Tensor<half> B, Tensor<half> C, bool a_t, bool b_t, cublasHandle_t cublas_handle) {
+	//const float alpha = 1.f;// / static_cast<float>(A.dims()[1]);
+	//const float beta =  1.f;
+	const float alpha = 1.f;
+	const float beta = 1.f;
+
+	int m = C.dims()[0];
+	int k = a_t ? A.dims()[0] : A.dims()[1];
+	int n = C.dims()[1];
+
+	int numRepeats = std::max(std::ceil(1e11 / (m * k * n)), 10.);
+
+	    // Warm up
+	cublasStatus_t stat = scaled_Hgemm(cublas_handle,
+	                a_t ? CUBLAS_OP_T : CUBLAS_OP_N,
+	                b_t ? CUBLAS_OP_T : CUBLAS_OP_N,
+	                m,
+	                n,
+	                k,
+	                &alpha,
+	                A.begin(), A.dims()[0],
+	                B.begin(), B.dims()[0],
+	                &beta,
+	                C.begin(), C.dims()[0]);
+	if (stat != CUBLAS_STATUS_SUCCESS) {
+		throw std::runtime_error("hgemm failed");
+	}
+
+	cudaDeviceSynchronize();
+	auto start = std::chrono::steady_clock::now();
+
+	for (int i = 0; i < numRepeats; ++i) {
+		cublasStatus_t stat = scaled_Hgemm(cublas_handle,
+				a_t ? CUBLAS_OP_T : CUBLAS_OP_N,
+	            b_t ? CUBLAS_OP_T : CUBLAS_OP_N,
+	            m,
+	            n,
+	            k,
+	            &alpha,
+	            A.begin(), A.dims()[0],
+	            B.begin(), B.dims()[0],
+	            &beta,
+	            C.begin(), C.dims()[0]);
+		if (stat != CUBLAS_STATUS_SUCCESS) {
+	            throw std::runtime_error("hgemm failed");
+	    }
+	}
+	cudaDeviceSynchronize();
+
+	auto end = std::chrono::steady_clock::now();
+	return static_cast<int>(std::chrono::duration<double, std::micro>(end - start).count() / numRepeats);
+}
+
+
+int time_Sgemm(Tensor<float> A, Tensor<float> B, Tensor<float> C, bool a_t, bool b_t, cublasHandle_t cublas_handle) {
+    const float alpha = 1.f;// / static_cast<float>(A.dims()[1]);
     const float beta  = 1.f;
 
     int m = C.dims()[0];
@@ -71,16 +126,12 @@ int time_gemm(Tensor<float> A, Tensor<float> B, Tensor<float> C, bool a_t, bool 
 
 int main(int argc, char **argv) {
     cudaFree(0);
-
-
-    cublasHandle_t cublas_handle;
-    cublasStatus_t status = cublasCreate(&cublas_handle);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        std::cout << "CUBLAS init failed" << std::endl;
-    }
-
+	cublasHandle_t cublas_handle;
+	cublasStatus_t status = cublasCreate(&cublas_handle);
+	if (status != CUBLAS_STATUS_SUCCESS) {
+	   std::cout << "CUBLAS init failed" << std::endl;
+	}
     curandGenerator_t curand_gen;
-
     curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT);
     curandSetPseudoRandomGeneratorSeed(curand_gen, 123ULL);
 
@@ -165,10 +216,10 @@ int main(int argc, char **argv) {
         std::make_tuple(7680, 5481, 2560, false, true)
     };
 
-    std::cout << std::setw(30) << "Times" << std::endl;
+    std::cout << std::setw(30) << "Times for gemm" << std::endl;
     std::cout << std::setfill('-') << std::setw(88) << "-" << std::endl;
     std::cout << std::setfill(' ');
-    std::cout << "    m       n      k      a_t     b_t      time (usec) " << std::endl;
+    std::cout << "    m       n      k      a_t     b_t      time (usec)      timeH (usec)      N(a)      N(b)      N(c)      N(a16)      N(b16)      N(c16)      SandHnormDiff " << std::endl;
     for (const auto &problem : problems) {
         int m, n, k;
         bool a_t, b_t;
@@ -183,10 +234,20 @@ int main(int argc, char **argv) {
         std::cout << std::setw(7) << k;
         std::cout << std::setw(7) << a_t ? "t" : "n";
         std::cout << std::setw(7) << b_t ? "t" : "n";
-        std::cout << std::setw(13) << std::setprecision(6) << time_gemm(a, b, c, a_t, b_t, cublas_handle);
+        std::cout << std::setw(13) << std::setprecision(6) << time_Sgemm(a, b, c, a_t, b_t, cublas_handle);
+        auto a16 = floatTensor2half(a);
+        auto b16 = floatTensor2half(b);
+        auto c16 = floatTensor2half(c);
+        std::cout << std::setw(16) << std::setprecision(6) << time_Hgemm(a16, b16, c16, a_t, b_t, cublas_handle);
+        std::cout << std::setw(18) << std::setprecision(6) << frobeniusNorm(a, cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(b, cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(c, cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(halfTensor2float(a16), cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(halfTensor2float(b16), cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(halfTensor2float(c16), cublas_handle);
+        std::cout << std::setw(12) << std::setprecision(6) << frobeniusNorm(minus(c, halfTensor2float(c16), cublas_handle), cublas_handle)/frobeniusNorm(c, cublas_handle);
         std::cout << std::endl;
     }
-
     cublasDestroy(cublas_handle);
     curandDestroyGenerator(curand_gen);
 

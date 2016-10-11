@@ -1,6 +1,6 @@
 
 NVCC=nvcc
-ARCH=sm_52
+ARCH=sm_60
 
 CUDA_PATH?=/usr/local/cuda
 CUDA_LIB64=$(CUDA_PATH)/lib64
@@ -31,15 +31,14 @@ rnn:
 	$(MKDIR) $(BIN_DIR)
 	$(CUDA_PATH)/bin/$(NVCC) rnn_bench.cu -o $(BIN_DIR)/rnn_bench -I $(CUDA_PATH)/include -I $(CUDNN_PATH)/include/ -L $(CUDNN_PATH)/lib64/ -L $(CUDA_LIB64) -lcurand -lcudnn -arch=$(ARCH) -std=c++11
 
-all_reduce: nccl_single nccl_mpi
+#all_reduce: nccl_single nccl_mpi
 
-nccl_single:
-	$(MKDIR) $(BIN_DIR)
-	$(CUDA_PATH)/bin/$(NVCC) nccl_single_all_reduce.cu -o $(BIN_DIR)/nccl_single_all_reduce -I $(NCCL_PATH)/build/include/ -I $(CUDNN_PATH)/include/ -L $(NCCL_PATH)/build/lib/ -L $(CUDNN_PATH)/lib64 -lnccl -lcurand -arch=$(ARCH) -std=c++11 
+#nccl_single:
+#	$(MKDIR) $(BIN_DIR)
+#	$(CUDA_PATH)/bin/$(NVCC) nccl_single_all_reduce.cu -o $(BIN_DIR)/nccl_single_all_reduce -I $(NCCL_PATH)/build/include/ -I $(CUDNN_PATH)/include/ -L $(NCCL_PATH)/build/lib/ -L $(CUDNN_PATH)/lib64 -lnccl -lcurand -arch=$(ARCH) -std=c++11 
 
-nccl_mpi:
-	$(MKDIR) $(BIN_DIR)
-	$(CUDA_PATH)/bin/$(NVCC) nccl_mpi_all_reduce.cu -o $(BIN_DIR)/nccl_mpi_all_reduce -I $(NCCL_PATH)/build/include/ -I $(CUDNN_PATH)/include/ -I $(MPI_PATH)/include -L $(NCCL_PATH)/build/lib/ -L $(CUDNN_PATH)/lib64 -L $(MPI_PATH)/lib -lnccl -lcurand -lmpi -arch=$(ARCH) -std=c++11 
+#nccl_mpi:
+#	$(CUDA_PATH)/bin/$(NVCC) nccl_mpi_all_reduce.cu -o $(BIN_DIR)/nccl_mpi_all_reduce -I $(NCCL_PATH)/build/include/ -I $(CUDNN_PATH)/include/ -I $(MPI_PATH)/include -L $(NCCL_PATH)/build/lib/ -L $(CUDNN_PATH)/lib64 -L $(MPI_PATH)/lib -lnccl -lcurand -lmpi -arch=$(ARCH) -std=c++11 
 
 clean:
 	rm -rf $(BIN_DIR)
