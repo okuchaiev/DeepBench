@@ -9,6 +9,8 @@
 #include <thrust/device_ptr.h>
 #include <thrust/fill.h>
 
+#define IDX2C(i,j,ld) (((j)*(ld))+(i))
+
 /**
  * Kernel from on device conversion from float to half arrays
  */
@@ -27,13 +29,15 @@ void copyHalfArray2FloatArray(int n, half *src, float *dst) {
 	if (i < n) dst[i] = __half2float(src[i]);
 }
 
+/**
+ * Shift and scale elements of array. This is to be used after curandUniform calls to scale to the range of interest.
+ */
 __global__
 void shiftAndScale(int n, float *src) {
-	float scale = 0.01;
+	float scale = 0.001;
 	int i = blockIdx.x*blockDim.x + threadIdx.x;
 	if (i < n) src[i] = src[i]*(2.f*scale) - scale;
 }
-
 
 template <typename T>
 class Tensor {
@@ -113,4 +117,26 @@ Tensor<float> rand(std::vector<int> dims, curandGenerator_t curand_gen) {
     curandGenerateUniform(curand_gen, tensor.begin(), tensor.size());
     shiftAndScale<<<(tensor.size_+255)/256, 256>>>(tensor.size(),tensor.begin());
     return tensor;
+}
+
+void print_data(int rows, int cols, float *data) {
+	std::cout<<std::endl<<"Printing matrix"<<std::endl;
+	for (int i=0;i<rows;++i) {
+		for (int j=0; j<cols; j++) {
+			std::cout<<data[IDX2C(i,j, rows)]<<" ";
+		}
+		std::cout<<std::endl;
+	}
+	std::cout<<"Done printing matrix"<<std::endl;
+}
+
+void print_GPU_data(int rows, int cols, half *g_data) {
+	float *ddd;
+	cudaMalloc(&ddd, rows*cols*sizeof(float));
+	copyHalfArray2FloatArray<<<(rows*cols+255)/256, 256>>>(rows*cols, g_data, ddd);
+	float *host_ddd = (float*)malloc(rows*cols*sizeof(float));
+	cudaMemcpy(host_ddd, ddd, rows*cols*sizeof(float), cudaMemcpyDeviceToHost);
+	print_data(rows, cols, host_ddd);
+	cudaFree(ddd);
+	free(host_ddd);
 }
