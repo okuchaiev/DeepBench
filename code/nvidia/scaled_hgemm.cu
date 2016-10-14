@@ -45,7 +45,7 @@ __global__ void do_scaling(const int rows, const int cols, __half *data, const _
 __global__ void scale_add(const int rows, const int cols, const __half *arg, __half *out, float beta) {
 	int id = blockIdx.x*blockDim.x + threadIdx.x;
 	if (id<rows*cols) {
-		out[id] = __float2half(__half2float(out[id])*beta + __half2float(arg[id]));
+		out[id] = __float2half((beta != 0.f ? __half2float(out[id])*beta + __half2float(arg[id]) : __half2float(arg[id])));
 	}
 }
 
@@ -180,7 +180,7 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 
 		if (transa==CUBLAS_OP_T) {
 			//inptA = get_super_slow_transpose(k, m, A);
-			inptA = get_super_slow_transpose(m, k, A);
+			inptA = get_super_slow_transpose(k, m, A);
 			cudaDeviceSynchronize();
 			createScalingDiagonal<<<(m+255)/256, 256>>>(m, k, inptA, Da, true);
 			cudaDeviceSynchronize();
@@ -193,7 +193,7 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 
 		if (transb==CUBLAS_OP_T) {
 			//inptB = get_super_slow_transpose(n, k, B);
-			inptB = get_super_slow_transpose(k, n, B);
+			inptB = get_super_slow_transpose(n, k, B);
 			cudaDeviceSynchronize();
 			createScalingDiagonal<<<(n+255)/256, 256>>>(k, n, inptB, Db, false);
 			cudaDeviceSynchronize();
@@ -206,6 +206,7 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 		cudaDeviceSynchronize();
 
 		do_scaling<<<(m+255)/256, 256>>>(m, k, Aprime, Da, true, true);
+		cudaDeviceSynchronize();
 		do_scaling<<<(n+255)/256, 256>>>(k, n, Bprime, Db, false, true);
 
 		__half *Cprime;
