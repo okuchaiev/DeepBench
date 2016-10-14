@@ -21,8 +21,8 @@ all: gemm #conv rnn all_reduce
 
 gemm:
 	$(MKDIR) $(BIN_DIR)
-	#$(CUDA_PATH)/bin/$(NVCC) scaled_hgemm.cu --compiler-options '-fPIC' -o libscaled_hgemm.so --shared -m64 
-	$(CUDA_PATH)/bin/$(NVCC) gemm_bench.cu -o $(BIN_DIR)/gemm_bench -I $(CUDA_PATH)/include -L $(BLAS_PATH) -l$(BLAS_LIBRARY) -L $(CUDA_LIB64) -lcurand -arch=$(ARCH) -std=c++11
+	$(CUDA_PATH)/bin/$(NVCC) --shared -o $(BIN_DIR)/libscaled_hgemm.so scaled_hgemm.cu --compiler-options '-fPIC' -arch=$(ARCH)
+	$(CUDA_PATH)/bin/$(NVCC) gemm_bench.cu -o $(BIN_DIR)/gemm_bench -I $(CUDA_PATH)/include -L $(BLAS_PATH) -l$(BLAS_LIBRARY) -L $(CUDA_LIB64) -lcurand -L $(BIN_DIR) -lscaled_hgemm -arch=$(ARCH) -std=c++11
 
 #conv:
 #	$(MKDIR) $(BIN_DIR)

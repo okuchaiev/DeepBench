@@ -12,7 +12,8 @@
 #include <thrust/device_ptr.h>
 #include <thrust/fill.h>
 #include "tensor.h"
-#include "scaled_hgemm.cu"
+//#include "scaled_hgemm.cu"
+#include "scaled_hgemm.h"
 
 
 
