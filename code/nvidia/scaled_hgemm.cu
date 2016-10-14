@@ -3,6 +3,54 @@
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
 #define min_represent 0.00001526624f
 
+/**
+ * Call like this <<<(rows+255)/256, 256>>> if reduce_cols = true
+ * <<<(cols+255)/256, 256>>> else
+ * inpt still has ld = rows regardless of reduce_cols
+ */
+__global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, bool reduce_cols) {
+	int id = blockIdx.x*blockDim.x + threadIdx.x;
+	if (reduce_cols && id < rows) {
+		float mx = fabs(__half2float(inpt[IDX2C(id, 0, rows)]));
+		for (int j=1; j<cols; ++j) {
+			if (mx < fabs(__half2float(inpt[IDX2C(id, j, rows)])))
+				mx = fabs(__half2float(inpt[IDX2C(id, j, rows)]));
+		}
+		res[id] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));
+
+	} else if (!reduce_cols && id < cols) {
+		float mx = fabs(__half2float(inpt[IDX2C(0, id, rows)]));
+		for (int i=1; i<rows; ++i) {
+			if (mx < fabs(__half2float(inpt[IDX2C(i, id, rows)])))
+				mx = fabs(__half2float(inpt[IDX2C(i, id, rows)]));
+			}
+		res[id] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));
+	}
+}
+
+//* Call like this <<<(rows+255)/256, 256>>> u
+__global__ void do_scaling(const int rows, const int cols, __half *data, const __half* scales, bool left, bool inv_scale) {
+	int id = blockIdx.x*blockDim.x + threadIdx.x;
+	float scale_factor = (!inv_scale ? __half2float(scales[id]) : 1.f/__half2float(scales[id]));
+	if (left && id < rows) {
+		for (int j=0; j<cols; ++j)
+			data[IDX2C(id, j, rows)] = __float2half(__half2float(data[IDX2C(id, j, rows)])* scale_factor);
+	} else if (!left && id < cols) {
+		for (int i=0; i<rows; ++i)
+			data[IDX2C(i, id, rows)] = __float2half(__half2float(data[IDX2C(i, id, rows)])* scale_factor);
+	}
+}
+
+//Does out=out*beta+arg
+__global__ void scale_add(const int rows, const int cols, const __half *arg, __half *out, float beta) {
+	int id = blockIdx.x*blockDim.x + threadIdx.x;
+	if (id<rows*cols) {
+		out[id] = __float2half(__half2float(out[id])*beta + __half2float(arg[id]));
+	}
+}
+
+
+/*
 __global__ void createDAScalingMatrices(const int rows, const int cols, const __half *A, __half *DA, __half *invDA) {
 	int cur_row_id = blockIdx.x*blockDim.x + threadIdx.x;
 	if (cur_row_id<rows){
@@ -35,7 +83,7 @@ __global__ void zeroInit(int n, __half* data) {
 	if (ind<n) {
 		data[ind] = __float2half(0.f);
 	}
-}
+}*/
 
 __global__ void coefConverterFloat2Half(const float *src, __half *out) {
 	(*out)=__float2half(*src);
@@ -102,6 +150,17 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
 
 	} else { //do outside scaling algorithm
+		__half *inptA;
+		__half *inptB;
+		__half *Da, *Db;
+		cudaMalloc(&Da, sizeof(__half)*m);
+		cudaMalloc(&Db, sizeof(__half)*n);
+
+		__half *Aprime;
+		cudaMalloc(&Aprime, m*k*sizeof(__half));
+		__half *Bprime;
+		cudaMalloc(&Bprime, k*n*sizeof(__half));
+
 		//bookkeeping for coefficients
 		float sp_alpha = 1.f, sp_beta = 0.f;
 		float *sp_d_alpha, *sp_d_beta;
@@ -116,68 +175,43 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 
 		coefConverterFloat2Half<<<1,1>>>(sp_d_alpha, sp_d_h_alpha);
 		coefConverterFloat2Half<<<1,1>>>(sp_d_beta, sp_d_h_beta);
+		cudaDeviceSynchronize();
 		//end of coef bookkeeping
 
-		__half *Da, *invDa, *Db, *invDb;
-		__half *inptA;
-		__half *inptB;
-
-		//Da and invDa
-		cudaMalloc(&Da, m*m*sizeof(__half));//
-		cudaMalloc(&invDa, m*m*sizeof(__half));//
-		//Db and invDb
-		cudaMalloc(&Db, n*n*sizeof(__half));//
-		cudaMalloc(&invDb, n*n*sizeof(__half));//
-		zeroInit<<<(m*m+255)/256, 256>>>(m*m, Da);
-		zeroInit<<<(m*m+255)/256, 256>>>(m*m, invDa);
-		zeroInit<<<(n*n+255)/256, 256>>>(n*n, Db);
-		zeroInit<<<(n*n+255)/256, 256>>>(n*n, invDb);
 		if (transa==CUBLAS_OP_T) {
-			inptA = get_super_slow_transpose(k, m, A);
-			createDAScalingMatrices<<<(m+255)/256,256>>>(m, k, inptA, Da, invDa);
+			//inptA = get_super_slow_transpose(k, m, A);
+			inptA = get_super_slow_transpose(m, k, A);
+			cudaDeviceSynchronize();
+			createScalingDiagonal<<<(m+255)/256, 256>>>(m, k, inptA, Da, true);
+			cudaDeviceSynchronize();
+			cudaMemcpy(Aprime, inptA, sizeof(__half)*m*k, cudaMemcpyDeviceToDevice);
 		} else {
-			createDAScalingMatrices<<<(m+255)/256,256>>>(m, k, A, Da, invDa);
+			createScalingDiagonal<<<(m+255)/256, 256>>>(m, k, A, Da, true);
+			cudaDeviceSynchronize();
+			cudaMemcpy(Aprime, A, sizeof(__half)*m*k, cudaMemcpyDeviceToDevice);
 		}
 
 		if (transb==CUBLAS_OP_T) {
-			inptB = get_super_slow_transpose(n, k, B);
-			createDBScalingMatrices<<<(n+255)/256,256>>>(k, n, inptB, Db, invDb);
+			//inptB = get_super_slow_transpose(n, k, B);
+			inptB = get_super_slow_transpose(k, n, B);
+			cudaDeviceSynchronize();
+			createScalingDiagonal<<<(n+255)/256, 256>>>(k, n, inptB, Db, false);
+			cudaDeviceSynchronize();
+			cudaMemcpy(Bprime, inptB, sizeof(__half)*n*k, cudaMemcpyDeviceToDevice);
 		} else {
-			createDBScalingMatrices<<<(n+255)/256,256>>>(k, n, B, Db, invDb);
+			createScalingDiagonal<<<(n+255)/256, 256>>>(k, n, B, Db, false);
+			cudaDeviceSynchronize();
+			cudaMemcpy(Bprime, B, sizeof(__half)*n*k, cudaMemcpyDeviceToDevice);
 		}
+		cudaDeviceSynchronize();
 
+		do_scaling<<<(m+255)/256, 256>>>(m, k, Aprime, Da, true, true);
+		do_scaling<<<(n+255)/256, 256>>>(k, n, Bprime, Db, false, true);
+
+		__half *Cprime;
+		cudaMalloc(&Cprime, m*n*sizeof(__half));
 		cudaDeviceSynchronize();
 		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
-
-		//Step1&2: Aprime=invDa*A
-		__half *Aprime;
-		cudaMalloc(&Aprime, m*k*sizeof(__half));//
-		status = cublasHgemm(handle,
-						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
-						m, k, m,
-						sp_d_h_alpha,
-						invDa, m,
-						(transa==CUBLAS_OP_T ? inptA : A), m,
-						sp_d_h_beta,
-						Aprime, m
-						);
-		cudaDeviceSynchronize();
-		//Steps3&4: Bprime=B*invDb
-		__half *Bprime;
-		cudaMalloc(&Bprime, k*n*sizeof(__half));//
-		status = cublasHgemm(handle,
-						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
-						k, n, n,
-						sp_d_h_alpha,
-						(transb==CUBLAS_OP_T ? inptB : B), k,
-						invDb, n,
-						sp_d_h_beta,
-						Bprime, k
-						);
-		cudaDeviceSynchronize();
-		//Step 5
-		__half *Cprime;
-		cudaMalloc(&Cprime, m*n*sizeof(__half));//
 		status = cublasHgemm(handle,
 						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
 						m, n, k,
@@ -185,54 +219,31 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 						Aprime, m,
 						Bprime, k,
 						sp_d_h_beta,
-						Cprime, m
-						);
+						Cprime, m);
+		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
 		cudaDeviceSynchronize();
-		//Step 6.1. Cprimeprime = Da*Cprime
-		__half *Cprimeprime;
-		cudaMalloc(&Cprimeprime, m*n*sizeof(__half));//
-		status = cublasHgemm(handle,
-						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
-						m, n, m,
-						sp_d_h_alpha,
-						Da, m,
-						Cprime, m,
-						sp_d_h_beta,
-						Cprimeprime, m
-						);
+		do_scaling<<<(m+255)/256, 256>>>(m, n, Cprime, Da, true, false);
 		cudaDeviceSynchronize();
-		//Step 6.2. C = Cprimeprime * Db
-		status = cublasHgemm(handle,
-						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
-						m, n, n,
-						d_h_alpha,
-						Cprimeprime, m,
-						Db, n,
-						d_h_beta,
-						C, m
-						);
+		do_scaling<<<(n+255)/256, 256>>>(m, n, Cprime, Db, false, false);
 		cudaDeviceSynchronize();
+		scale_add<<<(m*n)/256, 256>>>(m, n, Cprime, C, *beta);
+
 		//cleanup
 		cudaFree(sp_d_alpha);//
 		cudaFree(sp_d_beta);//
 		cudaFree(sp_d_h_alpha);//
 		cudaFree(sp_d_h_beta);//
 		cudaFree(Da);//
-		cudaFree(invDa);//
 		cudaFree(Db);//
-		cudaFree(invDb);//
 		cudaFree(Aprime);//
 		cudaFree(Bprime);//
 		cudaFree(Cprime);//
-		cudaFree(Cprimeprime);//
 		if (transa==CUBLAS_OP_T) {
 			cudaFree(inptA);
 		}
 		if (transb==CUBLAS_OP_T) {
 			cudaFree(inptB);
 		}
-		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
-
 	}//end of outside scaling
 	cudaFree(d_alpha);//
 	cudaFree(d_beta);//
