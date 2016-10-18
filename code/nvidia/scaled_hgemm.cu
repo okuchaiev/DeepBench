@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <cuda.h>
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
-#define min_represent 0.0000152663f
+#define min_represent 0.00001526624f
 #define DivCnst 256
 
 
@@ -23,7 +23,8 @@ inline void gpuErrchk(cudaError_t code, char *label)
  * inpt still has ld = rows regardless of reduce_cols
  */
 
-//(k, n, B, Db, Bprime, false, transb==CUBLAS_OP_T);
+//createScalingDiagonal<<<(m+DivCnst-1)/DivCnst, DivCnst>>>(m, k, A, Da, Aprime, true, true);
+
 __global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, __half* scaled_inpt, bool reduce_cols, bool transpose_input) {
 
 	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index if reduce_cols = true, else column index
@@ -203,13 +204,13 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
 						m, n, k,
 						d_h_alpha,
-						Aprime, lda,
+						Aprime, m,
 						//Aprime, m,
 						//Bprime, k,
-						Bprime, ldb,
+						Bprime, k,
 						sp_d_h_beta,
 						//Cprime, m);
-						Cprime, ldc);
+						Cprime, m);
 
 		//cudaFree(sp_d_alpha);//
 		cudaFree(sp_d_beta);//
