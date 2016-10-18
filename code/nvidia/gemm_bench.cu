@@ -141,6 +141,7 @@ int main(int argc, char **argv) {
 
     std::vector<std::tuple<int, int, int, bool, bool>> problems  = {
     	//std::make_tuple(16, 16, 8, true, false)
+    	std::make_tuple(3000, 6000, 20, true, false),
     	std::make_tuple(1760, 32, 1760, false, false),
         std::make_tuple(1760, 64, 1760, false, false),
         std::make_tuple(1760, 128, 1760, false, false),

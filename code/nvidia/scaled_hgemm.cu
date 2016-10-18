@@ -4,7 +4,7 @@
 #include <cuda.h>
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
 #define min_represent 0.0000152663f
-#define DivCnst 64
+#define DivCnst 256
 
 
 
@@ -23,6 +23,7 @@ inline void gpuErrchk(cudaError_t code, char *label)
  * inpt still has ld = rows regardless of reduce_cols
  */
 
+//(k, n, B, Db, Bprime, false, transb==CUBLAS_OP_T);
 __global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, __half* scaled_inpt, bool reduce_cols, bool transpose_input) {
 
 	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index if reduce_cols = true, else column index
@@ -61,32 +62,6 @@ __global__ void createScalingDiagonal(const int rows, const int cols, const __ha
 		}
 	}
 }
-
-
-/*__global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, bool reduce_cols) {
-
-	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index if reduce_cols = true, else column index
-
-	if (reduce_cols && id < rows) {
-		float mx = fabs(__half2float(inpt[IDX2C(id, 0, rows)]));
-		for (int j=1; j<cols; ++j) {
-			if (mx < fabs(__half2float(inpt[IDX2C(id, j, rows)])))
-				mx = fabs(__half2float(inpt[IDX2C(id, j, rows)]));
-		}
-		res[id] = (mx <= min_represent ? __float2half(1.f) : __float2half(mx));
-
-	} else if (!reduce_cols && id < cols) {
-		float mx = fabs(__half2float(inpt[IDX2C(0, id, rows)]));
-		for (int i=1; i<rows; ++i) {
-			if (mx < fabs(__half2float(inpt[IDX2C(i, id, rows)])))
-				mx = fabs(__half2float(inpt[IDX2C(i, id, rows)]));
-			}
-		res[id] = (mx <= min_represent ? __float2half(1.f) : __float2half(mx));
-	}
-}*/
-
-
-
 
 //* Call like this <<<(rows+255)/256, 256>>> if left
 //  else <<<(cols+255)/256, 256>>>
@@ -165,9 +140,6 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
                                                       int ldc, bool raw_hgemm) {
 
 	cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
-	cudaError_t err=cudaDeviceReset();
-	if(err!=cudaSuccess) std::cout<<"RESET ERROR!!!"<<std::endl;
-
 	float *d_alpha, *d_beta;
 	gpuErrchk(cudaMalloc((void **)&d_alpha, sizeof(float)), "1");
 	gpuErrchk(cudaMalloc((void **)&d_beta, sizeof(float)), "2");
@@ -195,8 +167,7 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 				A, lda,
 				B, ldb,
 				d_h_beta,
-				C, ldc
-				);
+				C, ldc);
 		//cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
 
 	} else { //do outside scaling algorithm
