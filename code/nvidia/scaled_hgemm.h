@@ -7,8 +7,6 @@
 
 #ifndef SCALED_HGEMM_H_
 #define SCALED_HGEMM_H_
-#include <memory>
-#include <cuda.h>
 #include <cublas_v2.h>
 
 cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,

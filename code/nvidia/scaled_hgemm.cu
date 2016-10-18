@@ -1,22 +1,79 @@
 #include "scaled_hgemm.h"
-
+#include <iostream>
+#include <stdio.h>
+#include <cuda.h>
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
-#define min_represent 0.00001526624f
+#define min_represent 0.0000152663f
+#define DivCnst 64
+
+
+
+inline void gpuErrchk(cudaError_t code, char *label)
+{
+   if (code != cudaSuccess)
+   {
+	  std::cout<<std::endl<<cudaGetErrorString(code)<<"  LABEL: "<<label<<std::endl;
+      //exit(code);
+   }
+}
 
 /**
  * Call like this <<<(rows+255)/256, 256>>> if reduce_cols = true
- * <<<(cols+255)/256, 256>>> else
+ * else <<<(cols+255)/256, 256>>>
  * inpt still has ld = rows regardless of reduce_cols
  */
-__global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, bool reduce_cols) {
-	int id = blockIdx.x*blockDim.x + threadIdx.x;
+
+__global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, __half* scaled_inpt, bool reduce_cols, bool transpose_input) {
+
+	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index if reduce_cols = true, else column index
+
+	if (reduce_cols && id < rows) { //id is row index
+		float mx = (!transpose_input ? fabs(__half2float(inpt[IDX2C(id, 0, rows)])) : fabs(__half2float(inpt[IDX2C(0, id, cols)])));
+
+		for (int j=1; j<cols; ++j) {
+			float element = (!transpose_input ? fabs(__half2float(inpt[IDX2C(id, j, rows)])) : fabs(__half2float(inpt[IDX2C(j, id, cols)])));
+			if (mx < element)
+				mx = element;
+		}
+		float scale = (mx <= min_represent ? 1.f : mx);
+		res[id] = __float2half(scale);
+
+		for (int j=0; j<cols; ++j) {
+			float element = (!transpose_input ? __half2float(inpt[IDX2C(id, j, rows)]) : __half2float(inpt[IDX2C(j, id, cols)]));
+			scaled_inpt[IDX2C(id, j, rows)] = __float2half(element/scale);
+		}
+
+
+	} else if (!reduce_cols && id < cols) { //id is column index
+		float mx = (!transpose_input ? fabs(__half2float(inpt[IDX2C(0, id, rows)])) : fabs(__half2float(inpt[IDX2C(id, 0, cols)])) );
+
+		for (int i=1; i<rows; ++i) {
+			float element = (!transpose_input ? fabs(__half2float(inpt[IDX2C(i, id, rows)])) : fabs(__half2float(inpt[IDX2C(id, i, cols)])));
+			if (mx < element)
+				mx = element;
+			}
+		float scale = (mx <= min_represent ? 1.f : mx);
+		res[id] = __float2half(scale);
+
+		for (int i=0; i<rows; ++i) {
+			float element = (!transpose_input ? __half2float(inpt[IDX2C(i, id, rows)]) : __half2float(inpt[IDX2C(id, i, cols)]));
+			scaled_inpt[IDX2C(i, id, rows)] = __float2half(element/scale);
+		}
+	}
+}
+
+
+/*__global__ void createScalingDiagonal(const int rows, const int cols, const __half *inpt, __half *res, bool reduce_cols) {
+
+	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index if reduce_cols = true, else column index
+
 	if (reduce_cols && id < rows) {
 		float mx = fabs(__half2float(inpt[IDX2C(id, 0, rows)]));
 		for (int j=1; j<cols; ++j) {
 			if (mx < fabs(__half2float(inpt[IDX2C(id, j, rows)])))
 				mx = fabs(__half2float(inpt[IDX2C(id, j, rows)]));
 		}
-		res[id] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));
+		res[id] = (mx <= min_represent ? __float2half(1.f) : __float2half(mx));
 
 	} else if (!reduce_cols && id < cols) {
 		float mx = fabs(__half2float(inpt[IDX2C(0, id, rows)]));
@@ -24,20 +81,27 @@ __global__ void createScalingDiagonal(const int rows, const int cols, const __ha
 			if (mx < fabs(__half2float(inpt[IDX2C(i, id, rows)])))
 				mx = fabs(__half2float(inpt[IDX2C(i, id, rows)]));
 			}
-		res[id] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));
+		res[id] = (mx <= min_represent ? __float2half(1.f) : __float2half(mx));
 	}
-}
+}*/
 
-//* Call like this <<<(rows+255)/256, 256>>> u
+
+
+
+//* Call like this <<<(rows+255)/256, 256>>> if left
+//  else <<<(cols+255)/256, 256>>>
+// Left means scales*data, right means data*scales
 __global__ void do_scaling(const int rows, const int cols, __half *data, const __half* scales, bool left, bool inv_scale) {
-	int id = blockIdx.x*blockDim.x + threadIdx.x;
+
+	int id = blockIdx.x*blockDim.x + threadIdx.x; //row index in data if left, else this is a column index
 	float scale_factor = (!inv_scale ? __half2float(scales[id]) : 1.f/__half2float(scales[id]));
+
 	if (left && id < rows) {
 		for (int j=0; j<cols; ++j)
-			data[IDX2C(id, j, rows)] = __float2half(__half2float(data[IDX2C(id, j, rows)])* scale_factor);
+			data[IDX2C(id, j, rows)] = __float2half(__half2float(data[IDX2C(id, j, rows)]) * scale_factor);
 	} else if (!left && id < cols) {
 		for (int i=0; i<rows; ++i)
-			data[IDX2C(i, id, rows)] = __float2half(__half2float(data[IDX2C(i, id, rows)])* scale_factor);
+			data[IDX2C(i, id, rows)] = __float2half(__half2float(data[IDX2C(i, id, rows)]) * scale_factor);
 	}
 }
 
@@ -49,61 +113,40 @@ __global__ void scale_add(const int rows, const int cols, const __half *arg, __h
 	}
 }
 
-
-/*
-__global__ void createDAScalingMatrices(const int rows, const int cols, const __half *A, __half *DA, __half *invDA) {
-	int cur_row_id = blockIdx.x*blockDim.x + threadIdx.x;
-	if (cur_row_id<rows){
-		//half mx = A[IDX2C(cur_row_id, 0, rows)];
-		float mx = fabs(__half2float(A[IDX2C(cur_row_id, 0, rows)]));
-		for (int j=1; j<cols; ++j) {
-			if (mx< fabs(__half2float(A[IDX2C(cur_row_id, j, rows)])))
-				mx = fabs(__half2float(A[IDX2C(cur_row_id, j, rows)]));
-		}
-		DA[IDX2C(cur_row_id, cur_row_id, rows)] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));
-		invDA[IDX2C(cur_row_id, cur_row_id, rows)] = (mx <= min_represent ? __float2half(1.f) : __float2half(1.f/mx));
-	}
-};
-
-__global__ void createDBScalingMatrices(const int rows, const int cols, const __half *B, __half *DB, __half *invDB) {
-	int cur_col_id = blockIdx.x*blockDim.x + threadIdx.x;
-	if (cur_col_id<cols){
-		float mx = fabs(__half2float(B[IDX2C(0, cur_col_id, rows)]));
-		for (int i=1; i<rows; ++i) {
-			if (mx < fabs(__half2float(B[IDX2C(i, cur_col_id, rows)])))
-				mx = fabs(__half2float(B[IDX2C(i, cur_col_id, rows)]));
-		}
-		DB[IDX2C(cur_col_id, cur_col_id, cols)] = (mx <= min_represent ? __float2half(1.f) :__float2half(mx));;
-		invDB[IDX2C(cur_col_id, cur_col_id, cols)] = (mx <= min_represent ? __float2half(1.f) : __float2half(1.f/mx));
-	}
-};
-
-__global__ void zeroInit(int n, __half* data) {
-	int ind = blockIdx.x*blockDim.x + threadIdx.x;
-	if (ind<n) {
-		data[ind] = __float2half(0.f);
-	}
-}*/
-
 __global__ void coefConverterFloat2Half(const float *src, __half *out) {
 	(*out)=__float2half(*src);
 };
 
+static const char *_cudaGetErrorEnum(cublasStatus_t error)
+{
+    switch (error)
+    {
+        case CUBLAS_STATUS_SUCCESS:
+            return "CUBLAS_STATUS_SUCCESS";
 
-__global__ void transposeKernel(int rows, int cols, const __half *src, __half *dst) {
-	int i = blockIdx.x*blockDim.x + threadIdx.x;
-	if (i<rows) {
-		for (int j=0;j<cols;++j) {
-			dst[IDX2C(j,i,cols)] = src[IDX2C(i,j,rows)];
-		}
-	}
-}
+        case CUBLAS_STATUS_NOT_INITIALIZED:
+            return "CUBLAS_STATUS_NOT_INITIALIZED";
 
-__half* get_super_slow_transpose(int rows, int cols, const __half *src) {
-	__half *fdata;
-	cudaMalloc(&fdata,sizeof(__half)*rows*cols);
-	transposeKernel<<<(rows + 255)/256, 256>>>(rows, cols, src, fdata);
-	return fdata;
+        case CUBLAS_STATUS_ALLOC_FAILED:
+            return "CUBLAS_STATUS_ALLOC_FAILED";
+
+        case CUBLAS_STATUS_INVALID_VALUE:
+            return "CUBLAS_STATUS_INVALID_VALUE";
+
+        case CUBLAS_STATUS_ARCH_MISMATCH:
+            return "CUBLAS_STATUS_ARCH_MISMATCH";
+
+        case CUBLAS_STATUS_MAPPING_ERROR:
+            return "CUBLAS_STATUS_MAPPING_ERROR";
+
+        case CUBLAS_STATUS_EXECUTION_FAILED:
+            return "CUBLAS_STATUS_EXECUTION_FAILED";
+
+        case CUBLAS_STATUS_INTERNAL_ERROR:
+            return "CUBLAS_STATUS_INTERNAL_ERROR";
+    }
+
+    return "<unknown>";
 }
 
 cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
@@ -121,23 +164,30 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
                                                       __half *C,
                                                       int ldc, bool raw_hgemm) {
 
+	cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
+	cudaError_t err=cudaDeviceReset();
+	if(err!=cudaSuccess) std::cout<<"RESET ERROR!!!"<<std::endl;
 
 	float *d_alpha, *d_beta;
-	cudaMalloc(&d_alpha, sizeof(float)); //
-	cudaMalloc(&d_beta, sizeof(float));  //
+	gpuErrchk(cudaMalloc((void **)&d_alpha, sizeof(float)), "1");
+	gpuErrchk(cudaMalloc((void **)&d_beta, sizeof(float)), "2");
 	cudaMemcpy(d_alpha, alpha, sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_beta, beta, sizeof(float), cudaMemcpyHostToDevice);
 
 	__half *d_h_alpha, *d_h_beta;
-	cudaMalloc(&d_h_alpha, sizeof(__half)); //
-	cudaMalloc(&d_h_beta, sizeof(__half));  //
+	gpuErrchk(cudaMalloc((void **)&d_h_alpha, sizeof(__half)), "3");
+	gpuErrchk(cudaMalloc((void **)&d_h_beta, sizeof(__half)), "4");
 
 	coefConverterFloat2Half<<<1,1>>>(d_alpha, d_h_alpha);
+	gpuErrchk( cudaPeekAtLastError() , "5");
+	gpuErrchk( cudaDeviceSynchronize(), "6" );
+
 	coefConverterFloat2Half<<<1,1>>>(d_beta, d_h_beta);
+	gpuErrchk( cudaPeekAtLastError(), "7" );
+	gpuErrchk( cudaDeviceSynchronize(), "8" );
 
 	cublasStatus_t status;
 	if (raw_hgemm) {
-		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
 		status = cublasHgemm(handle,
 				transa, transb,
 				m, n, k,
@@ -147,108 +197,76 @@ cublasStatus_t CUBLASWINAPI scaled_Hgemm (cublasHandle_t handle,
 				d_h_beta,
 				C, ldc
 				);
-		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+		//cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
 
 	} else { //do outside scaling algorithm
-		__half *inptA;
-		__half *inptB;
-		__half *Da, *Db;
-		cudaMalloc(&Da, sizeof(__half)*m);
-		cudaMalloc(&Db, sizeof(__half)*n);
-
-		__half *Aprime;
-		cudaMalloc(&Aprime, m*k*sizeof(__half));
-		__half *Bprime;
-		cudaMalloc(&Bprime, k*n*sizeof(__half));
+		__half *Da, *Db, *Aprime, *Bprime, *Cprime;
+		gpuErrchk(cudaMalloc((void **)&Da, sizeof(__half)*m), "9");//
+		gpuErrchk(cudaMalloc((void **)&Db, sizeof(__half)*n), "10");//
+		gpuErrchk(cudaMalloc((void **)&Aprime, m*k*sizeof(__half)), "11");//
+		gpuErrchk(cudaMalloc((void **)&Bprime, k*n*sizeof(__half)), "12");//
+		gpuErrchk(cudaMalloc((void **)&Cprime, m*n*sizeof(__half)), "13");//
 
 		//bookkeeping for coefficients
-		float sp_alpha = 1.f, sp_beta = 0.f;
-		float *sp_d_alpha, *sp_d_beta;
-		cudaMalloc(&sp_d_alpha, sizeof(float)); //
-		cudaMalloc(&sp_d_beta, sizeof(float));  //
-		cudaMemcpy(sp_d_alpha, &sp_alpha, sizeof(float), cudaMemcpyHostToDevice);
-		cudaMemcpy(sp_d_beta, &sp_beta, sizeof(float), cudaMemcpyHostToDevice);
-
-		__half *sp_d_h_alpha, *sp_d_h_beta;
-		cudaMalloc(&sp_d_h_alpha, sizeof(__half));//
-		cudaMalloc(&sp_d_h_beta, sizeof(__half));//
-
-		coefConverterFloat2Half<<<1,1>>>(sp_d_alpha, sp_d_h_alpha);
+		float sp_beta = 0.f; //host
+		float  *sp_d_beta; //device
+		gpuErrchk(cudaMalloc((void **)&sp_d_beta, sizeof(float)), "14");
+		gpuErrchk(cudaMemcpy(sp_d_beta, &sp_beta, sizeof(float), cudaMemcpyHostToDevice), "15");
+		__half *sp_d_h_beta;
+		gpuErrchk(cudaMalloc((void **)&sp_d_h_beta, sizeof(__half)), "16");
 		coefConverterFloat2Half<<<1,1>>>(sp_d_beta, sp_d_h_beta);
-		cudaDeviceSynchronize();
-		//end of coef bookkeeping
+		gpuErrchk( cudaPeekAtLastError(), "17" );
+		gpuErrchk( cudaDeviceSynchronize(), "18" );
 
-		if (transa==CUBLAS_OP_T) {
-			//inptA = get_super_slow_transpose(k, m, A);
-			inptA = get_super_slow_transpose(k, m, A);
-			cudaDeviceSynchronize();
-			createScalingDiagonal<<<(m+255)/256, 256>>>(m, k, inptA, Da, true);
-			cudaDeviceSynchronize();
-			cudaMemcpy(Aprime, inptA, sizeof(__half)*m*k, cudaMemcpyDeviceToDevice);
-		} else {
-			createScalingDiagonal<<<(m+255)/256, 256>>>(m, k, A, Da, true);
-			cudaDeviceSynchronize();
-			cudaMemcpy(Aprime, A, sizeof(__half)*m*k, cudaMemcpyDeviceToDevice);
-		}
+		//Step 1&2
+		createScalingDiagonal<<<(m+DivCnst-1)/DivCnst, DivCnst>>>(m, k, A, Da, Aprime, true, transa==CUBLAS_OP_T);
+		gpuErrchk( cudaPeekAtLastError(), "19" );
+		gpuErrchk( cudaDeviceSynchronize(), "20" );
+		//Step 3&4
+		createScalingDiagonal<<<(n+DivCnst-1)/DivCnst, DivCnst>>>(k, n, B, Db, Bprime, false, transb==CUBLAS_OP_T);
+		gpuErrchk( cudaPeekAtLastError(), "21" );
+		gpuErrchk( cudaDeviceSynchronize(), "22" );
 
-		if (transb==CUBLAS_OP_T) {
-			//inptB = get_super_slow_transpose(n, k, B);
-			inptB = get_super_slow_transpose(n, k, B);
-			cudaDeviceSynchronize();
-			createScalingDiagonal<<<(n+255)/256, 256>>>(k, n, inptB, Db, false);
-			cudaDeviceSynchronize();
-			cudaMemcpy(Bprime, inptB, sizeof(__half)*n*k, cudaMemcpyDeviceToDevice);
-		} else {
-			createScalingDiagonal<<<(n+255)/256, 256>>>(k, n, B, Db, false);
-			cudaDeviceSynchronize();
-			cudaMemcpy(Bprime, B, sizeof(__half)*n*k, cudaMemcpyDeviceToDevice);
-		}
-		cudaDeviceSynchronize();
-
-		do_scaling<<<(m+255)/256, 256>>>(m, k, Aprime, Da, true, true);
-		cudaDeviceSynchronize();
-		do_scaling<<<(n+255)/256, 256>>>(k, n, Bprime, Db, false, true);
-
-		__half *Cprime;
-		cudaMalloc(&Cprime, m*n*sizeof(__half));
-		cudaDeviceSynchronize();
-		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_DEVICE);
+		//Step 5
 		status = cublasHgemm(handle,
 						CUBLAS_OP_N, CUBLAS_OP_N,//transa, transb,
 						m, n, k,
-						sp_d_h_alpha,
-						Aprime, m,
-						Bprime, k,
+						d_h_alpha,
+						Aprime, lda,
+						//Aprime, m,
+						//Bprime, k,
+						Bprime, ldb,
 						sp_d_h_beta,
-						Cprime, m);
-		cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
-		cudaDeviceSynchronize();
-		do_scaling<<<(m+255)/256, 256>>>(m, n, Cprime, Da, true, false);
-		cudaDeviceSynchronize();
-		do_scaling<<<(n+255)/256, 256>>>(m, n, Cprime, Db, false, false);
-		cudaDeviceSynchronize();
-		scale_add<<<(m*n)/256, 256>>>(m, n, Cprime, C, *beta);
+						//Cprime, m);
+						Cprime, ldc);
 
-		//cleanup
-		cudaFree(sp_d_alpha);//
+		//cudaFree(sp_d_alpha);//
 		cudaFree(sp_d_beta);//
-		cudaFree(sp_d_h_alpha);//
+		//cudaFree(sp_d_h_alpha);//
 		cudaFree(sp_d_h_beta);//
-		cudaFree(Da);//
-		cudaFree(Db);//
 		cudaFree(Aprime);//
 		cudaFree(Bprime);//
+		do_scaling<<<(m+DivCnst-1)/DivCnst, DivCnst>>>(m, n, Cprime, Da, true, false);
+		cudaDeviceSynchronize();
+		do_scaling<<<(n+DivCnst-1)/DivCnst, DivCnst>>>(m, n, Cprime, Db, false, false);
+		cudaDeviceSynchronize();
+		scale_add<<<(m*n+DivCnst-1)/DivCnst, DivCnst>>>(m, n, Cprime, C, *beta);
+		//cleanup
+		cudaFree(Da);//
+		cudaFree(Db);//
 		cudaFree(Cprime);//
-		if (transa==CUBLAS_OP_T) {
-			cudaFree(inptA);
-		}
-		if (transb==CUBLAS_OP_T) {
-			cudaFree(inptB);
-		}
 	}//end of outside scaling
 	cudaFree(d_alpha);//
 	cudaFree(d_beta);//
 	cudaFree(d_h_alpha);//
 	cudaFree(d_h_beta);//
+	cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+	//checkCudaErrors();
+	if (status!=CUBLAS_STATUS_SUCCESS) {
+		std::cout << std::endl << std::endl;
+		std::cout << _cudaGetErrorEnum(status) << std::endl;
+
+	}
 	return status;
+	//return CUBLAS_STATUS_SUCCESS;
 }
