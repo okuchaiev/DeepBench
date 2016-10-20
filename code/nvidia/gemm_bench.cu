@@ -15,13 +15,15 @@
 //#include "scaled_hgemm.cu"
 #include "scaled_hgemm.h"
 
+#define ALPHA 1.7f
+#define BETA 0.3f
 
 
 int time_Hgemm(Tensor<half> A, Tensor<half> B, Tensor<half> C, bool a_t, bool b_t, cublasHandle_t cublas_handle, bool true_hgemm) {
 	//const float alpha = 1.f;// / static_cast<float>(A.dims()[1]);
 	//const float beta =  1.f;
-	const float alpha = 1.f;
-	const float beta = 0.f; //1.f;
+	const float alpha = ALPHA;
+	const float beta = BETA; //1.f;
 
 	int m = C.dims()[0];
 	int k = a_t ? A.dims()[0] : A.dims()[1];
@@ -75,8 +77,8 @@ int time_Hgemm(Tensor<half> A, Tensor<half> B, Tensor<half> C, bool a_t, bool b_
 
 
 int time_Sgemm(Tensor<float> A, Tensor<float> B, Tensor<float> C, bool a_t, bool b_t, cublasHandle_t cublas_handle) {
-    const float alpha = 1.f;// / static_cast<float>(A.dims()[1]);
-    const float beta  = 0.f;//1.f;
+    const float alpha = ALPHA;// / static_cast<float>(A.dims()[1]);
+    const float beta  = BETA;//1.f;
 
     int m = C.dims()[0];
     int k = a_t ? A.dims()[0] : A.dims()[1];
